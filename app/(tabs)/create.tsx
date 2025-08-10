@@ -1,7 +1,8 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { useEffect, useRef, useState } from "react";
-import { Alert, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Alert, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { SupabaseService } from '../../lib/supabaseService';
 
 export default function CreateRecipeScreen() {
   const [recipeName, setRecipeName] = useState<string>("");
@@ -13,6 +14,8 @@ export default function CreateRecipeScreen() {
   const [cameraReady, setCameraReady] = useState<boolean>(false);
   const [isTakingPhoto, setIsTakingPhoto] = useState<boolean>(false);
   const [cameraFacing, setCameraFacing] = useState<'front' | 'back'>('back');
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isUploadingImage, setIsUploadingImage] = useState<boolean>(false);
   const cameraRef = useRef<CameraView>(null);
   // Delay mounting the CameraView inside Modal to avoid surface race conditions on Android/Fabric
   const [shouldRenderCamera, setShouldRenderCamera] = useState<boolean>(false);
@@ -48,11 +51,11 @@ export default function CreateRecipeScreen() {
 
   // Mobile-specific camera initialization
   useEffect(() => {
-    // Reset readiness when the camera modal opens or facing changes
-    if (Platform.OS !== 'web' && cameraVisible) {
+    // Only reset readiness when the camera modal closes
+    if (!cameraVisible) {
       setCameraReady(false);
     }
-  }, [cameraVisible, cameraReady]);
+  }, [cameraVisible]);
 
   // Defer rendering the CameraView briefly after showing the Modal to avoid black preview on Android
   useEffect(() => {
@@ -77,6 +80,25 @@ export default function CreateRecipeScreen() {
     };
   }, [cameraVisible]);
 
+  // Add render log for debugging
+  console.log('[RENDER] cameraReady:', cameraReady, 'isTakingPhoto:', isTakingPhoto);
+
+  // Helper to fetch a local file URI as a Blob (for React Native/Expo)
+  const uriToBlob = async (uri: string): Promise<Blob> => {
+    return await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.onload = function () {
+        resolve(xhr.response);
+      };
+      xhr.onerror = function (e) {
+        reject(new TypeError('Network request failed'));
+      };
+      xhr.responseType = 'blob';
+      xhr.open('GET', uri, true);
+      xhr.send(null);
+    });
+  };
+
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -90,7 +112,20 @@ export default function CreateRecipeScreen() {
       quality: 1,
     });
     if (!result.canceled) {
-      setImageUri(result.assets[0].uri);
+      try {
+        const uri = result.assets[0].uri;
+        setImageUri(uri); // Show preview immediately
+        setIsUploadingImage(true);
+        const blob = await uriToBlob(uri);
+        const fileName = uri.split('/').pop() || `image_${Date.now()}.jpg`;
+        const publicUrl = await SupabaseService.uploadImage(blob, fileName);
+        setImageUri(publicUrl); // Use public URL for saving
+      } catch (error) {
+        console.error('Error uploading image:', error);
+        Alert.alert('Image Upload Error', 'Failed to upload image. Please try again.');
+      } finally {
+        setIsUploadingImage(false);
+      }
     }
   };
 
@@ -132,28 +167,25 @@ export default function CreateRecipeScreen() {
   };
 
   const takePhoto = async () => {
-    console.log('Take photo called, cameraReady:', cameraReady, 'cameraRef:', !!cameraRef.current);
-    
+    console.log('[takePhoto] Button pressed');
+    console.log('[takePhoto] cameraReady:', cameraReady, 'cameraRef:', !!cameraRef.current, 'isTakingPhoto:', isTakingPhoto);
     if (!cameraRef.current) {
       Alert.alert('Camera Not Ready', 'Camera reference is not available.');
+      console.log('[takePhoto] Camera reference is not available.');
       return;
     }
-    
     if (!cameraReady) {
       Alert.alert('Camera Not Ready', 'Please wait for the camera to initialize.');
+      console.log('[takePhoto] Camera is not ready.');
       return;
     }
-    
     if (isTakingPhoto) {
+      console.log('[takePhoto] Already taking a photo, aborting.');
       return; // Prevent multiple simultaneous photo captures
     }
-    
     setIsTakingPhoto(true);
-    
     try {
-      console.log('Taking picture...');
-      
-      // Use different configuration for mobile vs web
+      console.log('[takePhoto] Taking picture...');
       const photoOptions = Platform.OS === 'web' 
         ? {
             quality: 0.8,
@@ -166,32 +198,44 @@ export default function CreateRecipeScreen() {
             skipProcessing: true, // Skip processing on mobile to avoid capture issues
             exif: false,
           };
-      
       const photo = await cameraRef.current.takePictureAsync(photoOptions);
-      
-      console.log('Photo taken successfully:', photo);
-      
+      console.log('[takePhoto] Photo taken:', photo);
       if (photo && photo.uri) {
-        setImageUri(photo.uri);
+        setImageUri(photo.uri); // Show preview immediately
         setCameraVisible(false);
         setCameraReady(false);
+        setIsUploadingImage(true);
+        // Upload to Supabase Storage
+        try {
+          console.log('[takePhoto] Converting URI to blob:', photo.uri);
+          const blob = await uriToBlob(photo.uri);
+          const fileName = photo.uri.split('/').pop() || `photo_${Date.now()}.jpg`;
+          console.log('[takePhoto] Uploading to Supabase:', fileName);
+          const publicUrl = await SupabaseService.uploadImage(blob, fileName);
+          setImageUri(publicUrl); // Use public URL for saving
+          console.log('[takePhoto] Upload successful, public URL:', publicUrl);
+        } catch (error) {
+          console.error('[takePhoto] Error uploading photo:', error);
+          Alert.alert('Image Upload Error', 'Failed to upload photo. Please try again.');
+        } finally {
+          setIsUploadingImage(false);
+        }
       } else {
+        console.log('[takePhoto] Photo capture returned invalid data:', photo);
         throw new Error('Photo capture returned invalid data');
       }
     } catch (error: any) {
-      console.error('Error taking photo:', error);
-      
+      console.error('[takePhoto] Error taking photo:', error);
       let errorMessage = 'Failed to take photo. Please try again.';
-      
       if (error.message?.includes('Image could not be captured')) {
         errorMessage = 'Camera capture failed. Please ensure the camera is properly initialized and try again.';
       } else if (error.message) {
         errorMessage = `Failed to take photo: ${error.message}`;
       }
-      
       Alert.alert('Camera Error', errorMessage);
     } finally {
       setIsTakingPhoto(false);
+      console.log('[takePhoto] Done. isTakingPhoto set to false.');
     }
   };
 
@@ -229,6 +273,72 @@ export default function CreateRecipeScreen() {
     setCameraReady(false);
   };
 
+  const saveRecipe = async () => {
+    if (isUploadingImage) {
+      Alert.alert('Image Uploading', 'Please wait for the image to finish uploading before saving.');
+      return;
+    }
+    if (!recipeName.trim()) {
+      Alert.alert('Error', 'Please enter a recipe name');
+      return;
+    }
+
+    if (!ingredients.trim()) {
+      Alert.alert('Error', 'Please enter ingredients');
+      return;
+    }
+
+    if (!instructions.trim()) {
+      Alert.alert('Error', 'Please enter instructions');
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      console.log('💾 Saving recipe to Supabase...');
+      
+      const recipeData = {
+        name: recipeName.trim(),
+        ingredients: ingredients.trim(),
+        instructions: instructions.trim(),
+        image_url: imageUri || undefined,
+      };
+
+      console.log('📊 Recipe data:', recipeData);
+
+      const savedRecipe = await SupabaseService.createRecipe(recipeData);
+      
+      console.log('✅ Recipe saved successfully:', savedRecipe);
+      
+      Alert.alert(
+        'Success', 
+        'Recipe saved successfully!',
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              // Reset form
+              setRecipeName('');
+              setIngredients('');
+              setInstructions('');
+              setImageUri(null);
+            }
+          }
+        ]
+      );
+    } catch (error) {
+      console.error('❌ Error saving recipe:', error);
+      Alert.alert(
+        'Error', 
+        'Failed to save recipe. Please try again.',
+        [{ text: 'OK' }]
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   return (
     <View style={styles.container}>
       <ScrollView style={styles.content}>
@@ -237,6 +347,12 @@ export default function CreateRecipeScreen() {
         {imageUri && (
           <View style={styles.imageContainer}>
             <Image source={{ uri: imageUri }} style={styles.image} />
+            {isUploadingImage && (
+              <View style={{ marginTop: 10, alignItems: 'center' }}>
+                <ActivityIndicator size="small" color="#007AFF" />
+                <Text style={{ color: '#007AFF', marginTop: 4 }}>Uploading image...</Text>
+              </View>
+            )}
           </View>
         )}
 
@@ -294,8 +410,14 @@ export default function CreateRecipeScreen() {
           />
         </View>
 
-        <TouchableOpacity style={styles.saveButton}>
-          <Text style={styles.saveButtonText}>Save Recipe</Text>
+        <TouchableOpacity 
+          style={[styles.saveButton, (isSaving || isUploadingImage) && styles.saveButtonDisabled]} 
+          onPress={saveRecipe}
+          disabled={isSaving || isUploadingImage}
+        >
+          <Text style={styles.saveButtonText}>
+            {isSaving ? 'Saving...' : isUploadingImage ? 'Uploading Image...' : 'Save Recipe'}
+          </Text>
         </TouchableOpacity>
       </ScrollView>
 
@@ -310,8 +432,8 @@ export default function CreateRecipeScreen() {
         <View style={styles.modalContainer}>
           {shouldRenderCamera && (
             <CameraView 
-              style={styles.camera}
-              ref={cameraRef}
+            style={styles.camera}
+            ref={cameraRef}
               facing={cameraFacing}
         // Force remount when toggling visibility or switching cameras to avoid stale surfaces on mobile
         key={`${cameraFacing}-${cameraVisible ? 'open' : 'closed'}`}
@@ -319,10 +441,10 @@ export default function CreateRecipeScreen() {
               onMountError={handleCameraError}
             />
           )}
-          <View style={styles.cameraButtons}>
+            <View style={styles.cameraButtons}>
             <TouchableOpacity style={styles.closeButton} onPress={closeCamera}>
-              <Text style={styles.closeButtonText}>Close</Text>
-            </TouchableOpacity>
+                <Text style={styles.closeButtonText}>Close</Text>
+              </TouchableOpacity>
             <TouchableOpacity 
               style={[styles.captureButton, (!cameraReady || isTakingPhoto) && styles.captureButtonDisabled]} 
               onPress={takePhoto}
@@ -337,8 +459,8 @@ export default function CreateRecipeScreen() {
               onPress={switchCamera}
             >
               <Text style={styles.switchCameraButtonText}>Switch</Text>
-            </TouchableOpacity>
-          </View>
+              </TouchableOpacity>
+            </View>
         </View>
       </Modal>
     </View>
@@ -414,6 +536,10 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     marginTop: 24
+  },
+  saveButtonDisabled: {
+    backgroundColor: '#ccc',
+    opacity: 0.7,
   },
   saveButtonText: {
     color: '#fff',
