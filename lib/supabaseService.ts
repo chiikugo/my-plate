@@ -108,35 +108,61 @@ export class SupabaseService {
 // ...existing imports and class...
 
   // Upload image to Supabase storage
-  static async uploadImage(file: File | Blob, fileName: string): Promise<string> {
-    try {
-      const fileExt = fileName.split('.').pop() || 'bin';
-      const filePath = `${Date.now()}.${fileExt}`;
-      const contentType =
-        (file as any)?.type ||
-        (fileExt === 'png' ? 'image/png' :
-         fileExt === 'jpg' || fileExt === 'jpeg' ? 'image/jpeg' :
-         'application/octet-stream');
+  // Enhanced uploadImage method with detailed logging
+static async uploadImage(file: File | Blob, fileName: string): Promise<string> {
+  try {
+    console.log('🔄 [SUPABASE] Starting upload process...');
+    console.log('📁 [SUPABASE] File info:', {
+      fileName,
+      fileSize: file.size,
+      fileType: (file as any)?.type || 'unknown'
+    });
 
-      const { error } = await supabase.storage
-        .from('my-plate-bucket')
-        .upload(filePath, file, { contentType, upsert: true });
+    // Check authentication status
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    console.log('👤 [AUTH] User status:', user ? `Authenticated: ${user.email}` : 'Anonymous');
+    if (authError) console.log('⚠️ [AUTH] Auth error:', authError);
 
-      if (error) {
-        console.error('Error uploading image:', error);
-        throw error;
-      }
+    const fileExt = fileName.split('.').pop() || 'bin';
+    const filePath = `${Date.now()}.${fileExt}`;
+    const contentType =
+      (file as any)?.type ||
+      (fileExt === 'png' ? 'image/png' :
+       fileExt === 'jpg' || fileExt === 'jpeg' ? 'image/jpeg' :
+       'application/octet-stream');
 
-      const { data: urlData } = supabase.storage
-        .from('my-plate-bucket')
-        .getPublicUrl(filePath);
+    console.log('📋 [UPLOAD] Upload details:', {
+      filePath,
+      contentType,
+      bucket: 'my-plate-bucket'
+    });
 
-      return urlData.publicUrl;
-    } catch (error) {
-      console.error('Error in uploadImage:', error);
+    const { data, error } = await supabase.storage
+      .from('my-plate-bucket')
+      .upload(filePath, file, { contentType, upsert: true });
+
+    if (error) {
+      console.error('❌ [UPLOAD] Upload failed:', {
+        message: error.message,
+        statusCode: error.statusCode,
+        error: error
+      });
       throw error;
     }
+
+    console.log('✅ [UPLOAD] Upload successful:', data);
+
+    const { data: urlData } = supabase.storage
+      .from('my-plate-bucket')
+      .getPublicUrl(filePath);
+
+    console.log('🔗 [URL] Public URL generated:', urlData.publicUrl);
+    return urlData.publicUrl;
+  } catch (error) {
+    console.error('❌ [ERROR] Error in uploadImage:', error);
+    throw error;
   }
+}
 
   // List files in the bucket (works in Expo Go)
   static async listBucketFiles(prefix = '', limit = 20): Promise<string[]> {
