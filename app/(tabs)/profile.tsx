@@ -31,7 +31,7 @@ export default function ProfileScreen() {
     }
   };
 
-  // Enhanced image upload with detailed logging
+  // Enhanced image upload with real image picker
   const testUploadImage = async () => {
     setUploading(true);
     setUploadResult(null);
@@ -39,29 +39,17 @@ export default function ProfileScreen() {
     try {
       console.log('🔄 [UPLOAD] Starting image upload process...');
       
-      // Check authentication status first
-      console.log('🔄 [AUTH] Checking authentication status...');
-      // Add this line to check auth (you'll need to import supabase)
-      // const { data: { user } } = await supabase.auth.getUser();
-      // console.log('👤 [AUTH] Current user:', user ? `${user.email} (${user.id})` : 'Not authenticated');
-      
       // Request permissions on mobile
       if (Platform.OS !== 'web') {
-        console.log('📱 [PERMISSION] Requesting media library permissions...');
         const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        console.log('📱 [PERMISSION] Result:', permissionResult);
-        
         if (permissionResult.granted === false) {
-          console.log('❌ [PERMISSION] Permission denied');
           Alert.alert("Permission required", "Please allow access to photo library");
           setUploading(false);
           return;
         }
-        console.log('✅ [PERMISSION] Permission granted');
       }
 
       // Pick image
-      console.log('🖼️ [PICKER] Launching image picker...');
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
@@ -69,18 +57,12 @@ export default function ProfileScreen() {
         quality: 1,
       });
 
-      console.log('🖼️ [PICKER] Picker result:', {
-        canceled: result.canceled,
-        assetsCount: result.assets?.length || 0
-      });
-
       if (!result.canceled && result.assets[0]) {
         const imageUri = result.assets[0].uri;
-        const imageSize = result.assets[0].fileSize || 'unknown';
         
         console.log('🖼️ [IMAGE] Selected image:', {
           uri: imageUri,
-          size: imageSize,
+          size: result.assets[0].fileSize || 'unknown',
           width: result.assets[0].width,
           height: result.assets[0].height
         });
@@ -88,9 +70,8 @@ export default function ProfileScreen() {
         // Convert to blob
         console.log('🔄 [BLOB] Converting image to blob...');
         const response = await fetch(imageUri);
-        console.log('🔄 [BLOB] Fetch response status:', response.status);
-        
         const blob = await response.blob();
+        
         console.log('🔄 [BLOB] Blob created:', {
           size: blob.size,
           type: blob.type
@@ -103,7 +84,7 @@ export default function ProfileScreen() {
         const url = await SupabaseService.uploadImage(blob, fileName);
         
         console.log('✅ [SUCCESS] Upload completed! URL:', url);
-        setUploadResult('✅ Image uploaded! Public URL: ' + url);
+        setUploadResult('✅ Image uploaded successfully! URL: ' + url);
       } else {
         console.log('❌ [PICKER] No image selected or picker was canceled');
         setUploadResult('❌ No image selected');
@@ -285,7 +266,7 @@ const styles = StyleSheet.create({
     fontSize: 20,
     color: "#999",
   },
-  // NEW: Clean styles for test section
+  // Enhanced test section styles
   testContainer: {
     alignItems: 'center',
     padding: 16,
@@ -306,5 +287,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
     textAlign: 'center',
     paddingHorizontal: 16,
+    fontSize: 12,
   },
 });

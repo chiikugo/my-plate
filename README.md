@@ -42,6 +42,31 @@ To learn more about developing your project with Expo, look at the following res
 - [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
 - [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
 
+## Environment Setup (Supabase)
+
+1. Create a `.env` file by copying `.env.example`:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Fill in your Supabase values (these are safe for client use):
+
+   - `EXPO_PUBLIC_SUPABASE_URL` – Project URL from Supabase Dashboard → Settings → API
+   - `EXPO_PUBLIC_SUPABASE_ANON_KEY` – anon public key from Supabase Dashboard → Settings → API
+
+3. Start the app (Expo automatically loads `EXPO_PUBLIC_*` variables):
+
+   ```bash
+   npx expo start
+   ```
+
+Notes:
+
+- Do not put your Postgres connection string or service role key in the app. Those are server-side secrets.
+- Storage bucket used by this app: `my-plate-bucket`. Ensure it exists and is public or has appropriate read policy.
+- Example table used by the Add Recipe page: `test_recipes` with columns `recipe_name`, `ingredients`, `instructions`, `photo_url`.
+
 ## Join the community
 
 Join our community of developers creating universal apps.

@@ -1,10 +1,15 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SupabaseService } from '../../lib/supabaseService';
+import { Colors } from '../../constants/Colors';
+import { useColorScheme } from '../../hooks/useColorScheme';
 
 export default function CreateRecipeScreen() {
+  const colorScheme = useColorScheme() ?? 'light';
+  const theme = Colors[colorScheme];
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [recipeName, setRecipeName] = useState<string>("");
   const [ingredients, setIngredients] = useState<string>("");
   const [instructions, setInstructions] = useState<string>("");
@@ -17,7 +22,6 @@ export default function CreateRecipeScreen() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isUploadingImage, setIsUploadingImage] = useState<boolean>(false);
   const cameraRef = useRef<CameraView>(null);
-  // Delay mounting the CameraView inside Modal to avoid surface race conditions on Android/Fabric
   const [shouldRenderCamera, setShouldRenderCamera] = useState<boolean>(false);
   const renderDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -34,9 +38,7 @@ export default function CreateRecipeScreen() {
             [
               { text: 'Cancel', style: 'cancel' },
               { text: 'Open Settings', onPress: () => {
-                // This will open device settings on mobile
                 if (Platform.OS === 'ios') {
-                  // For iOS, we can't programmatically open settings, but we can guide the user
                   Alert.alert('Settings', 'Please go to Settings > Privacy & Security > Camera and enable camera access for this app.');
                 }
               }}
@@ -51,13 +53,12 @@ export default function CreateRecipeScreen() {
 
   // Mobile-specific camera initialization
   useEffect(() => {
-    // Only reset readiness when the camera modal closes
     if (!cameraVisible) {
       setCameraReady(false);
     }
   }, [cameraVisible]);
 
-  // Defer rendering the CameraView briefly after showing the Modal to avoid black preview on Android
+  // Defer rendering the CameraView briefly after showing the Modal
   useEffect(() => {
     if (cameraVisible) {
       setShouldRenderCamera(false);
@@ -80,51 +81,85 @@ export default function CreateRecipeScreen() {
     };
   }, [cameraVisible]);
 
-  // Add render log for debugging
   console.log('[RENDER] cameraReady:', cameraReady, 'isTakingPhoto:', isTakingPhoto);
 
-  // Helper to fetch a local file URI as a Blob (for React Native/Expo)
-  const uriToBlob = async (uri: string): Promise<Blob> => {
-    return await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.onload = function () {
-        resolve(xhr.response);
-      };
-      xhr.onerror = function (e) {
-        reject(new TypeError('Network request failed'));
-      };
-      xhr.responseType = 'blob';
-      xhr.open('GET', uri, true);
-      xhr.send(null);
-    });
+  // Get content type from filename/uri
+  // Used to provide a correct MIME type when uploading to Supabase Storage.
+  const inferContentType = (nameOrUri: string): string => {
+    const lower = nameOrUri.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.startsWith('data:image/png')) return 'image/png';
+    if (lower.startsWith('data:image/jpg') || lower.startsWith('data:image/jpeg')) return 'image/jpeg';
+    return 'application/octet-stream';
   };
 
+  // Enhanced image upload helper
+  // - On Web: loads the URI as a Blob, then uploads to Supabase Storage
+  // - On Native (iOS/Android): loads the URI as bytes (Uint8Array), then uploads
+  // - Returns the public image URL created by Supabase Storage (requires public bucket or read policy)
+  const uploadImageToSupabase = async (uri: string, source: 'gallery' | 'camera' | 'retry'): Promise<string> => {
+    try {
+      console.log(`🔄 [${source.toUpperCase()}] Starting upload for URI:`, uri);
+      setIsUploadingImage(true);
+      
+      const fileName = `${source}_${Date.now()}_${uri.split('/').pop() || 'image.jpg'}`;
+      const contentType = inferContentType(fileName) || 'image/jpeg';
+
+      let publicUrl: string;
+      if (Platform.OS === 'web') {
+        const resp = await fetch(uri);
+        const blob = await resp.blob();
+        console.log(`☁️ [${source.toUpperCase()}] Uploading Blob to Supabase:`, fileName, contentType);
+        publicUrl = await SupabaseService.uploadImage(blob, fileName, blob.type || contentType);
+      } else {
+        const resp = await fetch(uri);
+        const arrayBuffer = await resp.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        console.log(`☁️ [${source.toUpperCase()}] Uploading bytes to Supabase:`, fileName, contentType, `(size=${bytes.byteLength})`);
+        publicUrl = await SupabaseService.uploadImage(bytes, fileName, contentType);
+      }
+      
+      console.log(`✅ [${source.toUpperCase()}] Upload successful:`, publicUrl);
+      return publicUrl;
+    } catch (error) {
+      console.error(`❌ [${source.toUpperCase()}] Upload failed:`, error);
+      throw error;
+    } finally {
+      setIsUploadingImage(false);
+    }
+  };
+
+  // Enhanced pick image function
+  // Launches the media library, previews image locally, then uploads to Supabase.
+  // On success, the preview is updated to use the final Supabase public URL.
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
       Alert.alert('Permission Required', 'Sorry, we need camera roll permissions to make this work!');
       return;
     }
+    
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
       aspect: [4, 3],
-      quality: 1,
+      quality: 0.8,
     });
+    
     if (!result.canceled) {
       try {
         const uri = result.assets[0].uri;
         setImageUri(uri); // Show preview immediately
-        setIsUploadingImage(true);
-        const blob = await uriToBlob(uri);
-        const fileName = uri.split('/').pop() || `image_${Date.now()}.jpg`;
-        const publicUrl = await SupabaseService.uploadImage(blob, fileName);
-        setImageUri(publicUrl); // Use public URL for saving
+        
+        const publicUrl = await uploadImageToSupabase(uri, 'gallery');
+        setImageUri(publicUrl); // Use public URL for database
+        
+        Alert.alert('Success', 'Image uploaded successfully!');
       } catch (error) {
         console.error('Error uploading image:', error);
-        Alert.alert('Image Upload Error', 'Failed to upload image. Please try again.');
-      } finally {
-        setIsUploadingImage(false);
+        Alert.alert('Upload Error', 'Failed to upload image. Please try again.');
+        setImageUri(null); // Reset on error
       }
     }
   };
@@ -148,27 +183,29 @@ export default function CreateRecipeScreen() {
     return true;
   };
 
+  // Opens the camera modal after checking permissions.
   const openCamera = async () => {
-    // Check if we have camera permissions
     const hasPermission = await checkCameraPermissions();
     if (!hasPermission) {
       return;
     }
     
-    // Reset camera state
     setCameraReady(false);
     setIsTakingPhoto(false);
     setCameraVisible(true);
     
-    // For mobile, we need to ensure the camera is properly initialized
     if (Platform.OS !== 'web') {
       console.log('Opening camera on mobile device');
     }
   };
 
+  // Takes a photo using the Expo Camera.
+  // After capture, we immediately preview the local URI and then upload it.
+  // On successful upload, imageUri is replaced with the Supabase public URL.
   const takePhoto = async () => {
     console.log('[takePhoto] Button pressed');
     console.log('[takePhoto] cameraReady:', cameraReady, 'cameraRef:', !!cameraRef.current, 'isTakingPhoto:', isTakingPhoto);
+    
     if (!cameraRef.current) {
       Alert.alert('Camera Not Ready', 'Camera reference is not available.');
       console.log('[takePhoto] Camera reference is not available.');
@@ -181,8 +218,9 @@ export default function CreateRecipeScreen() {
     }
     if (isTakingPhoto) {
       console.log('[takePhoto] Already taking a photo, aborting.');
-      return; // Prevent multiple simultaneous photo captures
+      return;
     }
+    
     setIsTakingPhoto(true);
     try {
       console.log('[takePhoto] Taking picture...');
@@ -195,30 +233,27 @@ export default function CreateRecipeScreen() {
         : {
             quality: 0.8,
             base64: false,
-            skipProcessing: true, // Skip processing on mobile to avoid capture issues
+            skipProcessing: true,
             exif: false,
           };
+      
       const photo = await cameraRef.current.takePictureAsync(photoOptions);
       console.log('[takePhoto] Photo taken:', photo);
+      
       if (photo && photo.uri) {
         setImageUri(photo.uri); // Show preview immediately
         setCameraVisible(false);
         setCameraReady(false);
-        setIsUploadingImage(true);
-        // Upload to Supabase Storage
+        
         try {
-          console.log('[takePhoto] Converting URI to blob:', photo.uri);
-          const blob = await uriToBlob(photo.uri);
-          const fileName = photo.uri.split('/').pop() || `photo_${Date.now()}.jpg`;
-          console.log('[takePhoto] Uploading to Supabase:', fileName);
-          const publicUrl = await SupabaseService.uploadImage(blob, fileName);
-          setImageUri(publicUrl); // Use public URL for saving
-          console.log('[takePhoto] Upload successful, public URL:', publicUrl);
+          const publicUrl = await uploadImageToSupabase(photo.uri, 'camera');
+          setImageUri(publicUrl); // Use public URL for database
+          
+          Alert.alert('Success', 'Photo uploaded successfully!');
         } catch (error) {
-          console.error('[takePhoto] Error uploading photo:', error);
-          Alert.alert('Image Upload Error', 'Failed to upload photo. Please try again.');
-        } finally {
-          setIsUploadingImage(false);
+          console.error('Error uploading photo:', error);
+          Alert.alert('Upload Error', 'Failed to upload photo. Please try again.');
+          setImageUri(null); // Reset on error
         }
       } else {
         console.log('[takePhoto] Photo capture returned invalid data:', photo);
@@ -273,6 +308,37 @@ export default function CreateRecipeScreen() {
     setCameraReady(false);
   };
 
+  // NEW: Image management functions
+  const removeImage = () => {
+    Alert.alert(
+      'Remove Image',
+      'Are you sure you want to remove this image?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Remove', 
+          style: 'destructive',
+          onPress: () => setImageUri(null)
+        }
+      ]
+    );
+  };
+
+  const retryImageUpload = async () => {
+    if (!imageUri) return;
+    
+    try {
+      const publicUrl = await uploadImageToSupabase(imageUri, 'retry');
+      setImageUri(publicUrl);
+      Alert.alert('Success', 'Image re-uploaded successfully!');
+    } catch (error) {
+      Alert.alert('Upload Error', 'Failed to re-upload image. Please try again.');
+    }
+  };
+
+  // Save the recipe to the `test_recipes` table.
+  // Requires that `imageUri` already holds a Supabase public URL from a successful upload.
+  // Maps to columns: recipe_name, ingredients, instructions, photo_url
   const saveRecipe = async () => {
     if (isUploadingImage) {
       Alert.alert('Image Uploading', 'Please wait for the image to finish uploading before saving.');
@@ -282,32 +348,35 @@ export default function CreateRecipeScreen() {
       Alert.alert('Error', 'Please enter a recipe name');
       return;
     }
-
     if (!ingredients.trim()) {
       Alert.alert('Error', 'Please enter ingredients');
       return;
     }
-
     if (!instructions.trim()) {
       Alert.alert('Error', 'Please enter instructions');
+      return;
+    }
+    // Require an uploaded image with a public URL
+    if (!imageUri || !imageUri.includes('supabase')) {
+      Alert.alert('Image Required', 'Please upload a photo first, then save.');
       return;
     }
 
     setIsSaving(true);
 
     try {
-      console.log('💾 Saving recipe to Supabase...');
-      
-      const recipeData = {
-        name: recipeName.trim(),
+      console.log('💾 Saving recipe to Supabase (test_recipes)...');
+
+      const testRecipeInput = {
+        recipe_name: recipeName.trim(),
         ingredients: ingredients.trim(),
         instructions: instructions.trim(),
-        image_url: imageUri || undefined,
+        photo_url: imageUri,
       };
 
-      console.log('📊 Recipe data:', recipeData);
+      console.log('📊 test_recipes input:', testRecipeInput);
 
-      const savedRecipe = await SupabaseService.createRecipe(recipeData);
+      const savedRecipe = await SupabaseService.createTestRecipe(testRecipeInput);
       
       console.log('✅ Recipe saved successfully:', savedRecipe);
       
@@ -340,17 +409,48 @@ export default function CreateRecipeScreen() {
   };
 
   return (
-    <View style={styles.container}>
-      <ScrollView style={styles.content}>
+    <SafeAreaView style={styles.container}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+          automaticallyAdjustKeyboardInsets
+        >
         <Text style={styles.title}>Add Item</Text>
 
+        {/* Enhanced Image Container */}
         {imageUri && (
           <View style={styles.imageContainer}>
             <Image source={{ uri: imageUri }} style={styles.image} />
+            
+            {/* Upload Status */}
             {isUploadingImage && (
-              <View style={{ marginTop: 10, alignItems: 'center' }}>
+              <View style={styles.uploadStatus}>
                 <ActivityIndicator size="small" color="#007AFF" />
-                <Text style={{ color: '#007AFF', marginTop: 4 }}>Uploading image...</Text>
+                <Text style={styles.uploadText}>Uploading image...</Text>
+              </View>
+            )}
+            
+            {/* Image Actions */}
+            {!isUploadingImage && (
+              <View style={styles.imageActions}>
+                <TouchableOpacity 
+                  style={styles.imageActionButton} 
+                  onPress={removeImage}
+                >
+                  <Text style={styles.imageActionText}>Remove</Text>
+                </TouchableOpacity>
+                
+                {/* Show retry if URL doesn't look like Supabase URL */}
+                {!imageUri.includes('supabase') && (
+                  <TouchableOpacity 
+                    style={[styles.imageActionButton, styles.retryButton]} 
+                    onPress={retryImageUpload}
+                  >
+                    <Text style={styles.imageActionText}>Retry Upload</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             )}
           </View>
@@ -419,32 +519,31 @@ export default function CreateRecipeScreen() {
             {isSaving ? 'Saving...' : isUploadingImage ? 'Uploading Image...' : 'Save Recipe'}
           </Text>
         </TouchableOpacity>
-      </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
 
       <Modal 
         visible={cameraVisible} 
         transparent={false} 
         animationType="slide"
-    // On Android, enabling hardware acceleration prevents black camera preview in Modal
-    hardwareAccelerated
+        hardwareAccelerated
         presentationStyle={Platform.OS === 'ios' ? 'fullScreen' : undefined}
       >
         <View style={styles.modalContainer}>
           {shouldRenderCamera && (
             <CameraView 
-            style={styles.camera}
-            ref={cameraRef}
+              style={styles.camera}
+              ref={cameraRef}
               facing={cameraFacing}
-        // Force remount when toggling visibility or switching cameras to avoid stale surfaces on mobile
-        key={`${cameraFacing}-${cameraVisible ? 'open' : 'closed'}`}
+              key={`${cameraFacing}-${cameraVisible ? 'open' : 'closed'}`}
               onCameraReady={handleCameraReady}
               onMountError={handleCameraError}
             />
           )}
-            <View style={styles.cameraButtons}>
+          <View style={styles.cameraButtons}>
             <TouchableOpacity style={styles.closeButton} onPress={closeCamera}>
-                <Text style={styles.closeButtonText}>Close</Text>
-              </TouchableOpacity>
+              <Text style={styles.closeButtonText}>Close</Text>
+            </TouchableOpacity>
             <TouchableOpacity 
               style={[styles.captureButton, (!cameraReady || isTakingPhoto) && styles.captureButtonDisabled]} 
               onPress={takePhoto}
@@ -459,159 +558,205 @@ export default function CreateRecipeScreen() {
               onPress={switchCamera}
             >
               <Text style={styles.switchCameraButtonText}>Switch</Text>
-              </TouchableOpacity>
-            </View>
+            </TouchableOpacity>
+          </View>
         </View>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff'
-  },
-  content: {
-    flex: 1,
-    padding: 24
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    marginBottom: 32,
-    color: '#333',
-    textAlign: 'center'
-  },
-  imageContainer: {
-    marginBottom: 24,
-    alignItems: 'center'
-  },
-  image: {
-    width: 200,
-    height: 200,
-    borderRadius: 8
-  },
-  buttonContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 24
-  },
-  button: {
-    backgroundColor: '#007AFF',
-    padding: 12,
-    borderRadius: 8,
-    width: '45%'
-  },
-  buttonDisabled: {
-    backgroundColor: '#ccc',
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: '#fff',
-    textAlign: 'center',
-    fontSize: 16,
-    fontWeight: '600'
-  },
-  inputContainer: {
-    marginBottom: 24
-  },
-  label: {
-    fontSize: 16,
-    marginBottom: 8,
-    color: '#666'
-  },
-  input: {
-    backgroundColor: '#f5f5f5',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 16
-  },
-  textArea: {
-    height: 150
-  },
-  saveButton: {
-    backgroundColor: '#4CAF50',
-    padding: 16,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 24
-  },
-  saveButtonDisabled: {
-    backgroundColor: '#ccc',
-    opacity: 0.7,
-  },
-  saveButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600'
-  },
-  modalContainer: {
-    flex: 1,
-    backgroundColor: 'black',
-    ...(Platform.OS !== 'web' && {
-      // Mobile-specific styles
-      position: 'relative',
-    })
-  },
-  camera: {
-    flex: 1,
-    ...(Platform.OS !== 'web' && {
-      // Mobile-specific camera styles
-      width: '100%',
-      height: '100%',
-    })
-  },
-  cameraButtons: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    backgroundColor: 'transparent'
-  },
-  closeButton: {
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    padding: 15,
-    borderRadius: 8,
-    minWidth: 80,
-    alignItems: 'center'
-  },
-  captureButton: {
-    backgroundColor: '#FF0000',
-    padding: 15,
-    borderRadius: 50,
-    width: 70,
-    height: 70,
-    justifyContent: 'center',
-    alignItems: 'center'
-  },
-  captureButtonDisabled: {
-    opacity: 0.5,
-  },
-  closeButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600'
-  },
-  captureButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600'
-  },
-  switchCameraButton: {
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    padding: 15,
-    borderRadius: 8,
-    minWidth: 80,
-    alignItems: 'center'
-  },
-  switchCameraButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600'
-  }
-});
+const createStyles = (theme: typeof Colors.light | typeof Colors.dark) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.background,
+    },
+    scroll: {
+      flex: 1,
+      backgroundColor: theme.background,
+    },
+    content: {
+      padding: 24,
+      paddingBottom: 40,
+    },
+    title: {
+      fontSize: 28,
+      fontWeight: 'bold',
+      marginBottom: 32,
+      color: theme.text,
+      textAlign: 'center',
+    },
+    imageContainer: {
+      marginBottom: 24,
+      alignItems: 'center',
+    },
+    image: {
+      width: 200,
+      height: 200,
+      borderRadius: 8,
+    },
+    // NEW: Enhanced image upload styles
+    uploadStatus: {
+      marginTop: 10,
+      alignItems: 'center',
+      flexDirection: 'row',
+      justifyContent: 'center',
+    },
+    uploadText: {
+      color: theme.tint,
+      marginLeft: 8,
+      fontSize: 14,
+    },
+    imageActions: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+      marginTop: 12,
+      gap: 16,
+    },
+    imageActionButton: {
+      backgroundColor: '#FF6B6B',
+      paddingHorizontal: 16,
+      paddingVertical: 8,
+      borderRadius: 6,
+    },
+    retryButton: {
+      backgroundColor: '#FFA500',
+    },
+    imageActionText: {
+      color: '#fff',
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    buttonContainer: {
+      flexDirection: 'row',
+      justifyContent: 'space-around',
+      marginBottom: 24,
+    },
+    button: {
+      backgroundColor: '#007AFF',
+      padding: 12,
+      borderRadius: 8,
+      width: '45%',
+    },
+    buttonDisabled: {
+      backgroundColor: '#555',
+      opacity: 0.6,
+    },
+    buttonText: {
+      color: '#fff',
+      textAlign: 'center',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    inputContainer: {
+      marginBottom: 24,
+    },
+    label: {
+      fontSize: 16,
+      marginBottom: 8,
+      color: theme.text,
+    },
+    input: {
+      backgroundColor: theme === Colors.dark ? '#1f2123' : '#f5f5f5',
+      borderRadius: 8,
+      padding: 12,
+      fontSize: 16,
+      color: theme.text,
+    },
+    textArea: {
+      height: 150,
+    },
+    saveButton: {
+      backgroundColor: '#4CAF50',
+      padding: 16,
+      borderRadius: 8,
+      alignItems: 'center',
+      marginTop: 24,
+    },
+    saveButtonDisabled: {
+      backgroundColor: '#2a2a2a',
+      opacity: 0.6,
+    },
+    saveButtonText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    modalContainer: {
+      flex: 1,
+      backgroundColor: theme.background,
+      ...(Platform.OS !== 'web' && {
+        position: 'relative',
+      }),
+    },
+    camera: {
+      flex: 1,
+      ...(Platform.OS !== 'web' && {
+        width: '100%',
+        height: '100%',
+      }),
+    },
+    cameraButtons: {
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: 20,
+      backgroundColor: 'transparent',
+    },
+    closeButton: {
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+      padding: 15,
+      borderRadius: 8,
+      minWidth: 80,
+      alignItems: 'center',
+    },
+    captureButton: {
+      backgroundColor: '#FF0000',
+      padding: 15,
+      borderRadius: 50,
+      width: 70,
+      height: 70,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    captureButtonDisabled: {
+      opacity: 0.5,
+    },
+    closeButtonText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    captureButtonText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    switchCameraButton: {
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+      padding: 15,
+      borderRadius: 8,
+      minWidth: 80,
+      alignItems: 'center',
+    },
+    switchCameraButtonText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+  });
+
+// util to determine readable text color for buttons
+function colorReadable(hex: string): boolean {
+  // simple luminance check; assume hex like #RRGGBB
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.6; // true => use dark text
+}
