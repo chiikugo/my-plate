@@ -1,6 +1,108 @@
-import { Text, View, StyleSheet, TouchableOpacity, Image } from "react-native";
+import * as ImagePicker from 'expo-image-picker';
+import { useState } from "react";
+import { Alert, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { SupabaseService } from "../../lib/supabaseService";
 
 export default function ProfileScreen() {
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [uploadResult, setUploadResult] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [listResult, setListResult] = useState<string | null>(null);
+  const [listing, setListing] = useState(false);
+
+  const testListBucket = async () => {
+    setListing(true);
+    setListResult(null);
+    console.log('[UI] Testing bucket access via list...');
+    try {
+      const files = await SupabaseService.listBucketFiles();
+      console.log('[UI] Bucket list result:', files);
+      setListResult(
+        files.length
+          ? `✅ Bucket list OK. Files: ${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (+${files.length - 5} more)` : ''}`
+          : '✅ Bucket list OK. No files found.'
+      );
+    } catch (error: any) {
+      console.error('[UI] Bucket list failed:', error);
+      setListResult('❌ Bucket list failed: ' + (error?.message || String(error)));
+    } finally {
+      setListing(false);
+    }
+  };
+
+  // Enhanced image upload with real image picker
+  const testUploadImage = async () => {
+    setUploading(true);
+    setUploadResult(null);
+    
+    try {
+      console.log('🔄 [UPLOAD] Starting image upload process...');
+      
+      // Request permissions on mobile
+      if (Platform.OS !== 'web') {
+        const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (permissionResult.granted === false) {
+          Alert.alert("Permission required", "Please allow access to photo library");
+          setUploading(false);
+          return;
+        }
+      }
+
+      // Pick image
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [4, 3],
+        quality: 1,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        const imageUri = result.assets[0].uri;
+        
+        console.log('🖼️ [IMAGE] Selected image:', {
+          uri: imageUri,
+          size: result.assets[0].fileSize || 'unknown',
+          width: result.assets[0].width,
+          height: result.assets[0].height
+        });
+        
+        // Convert to blob
+        console.log('🔄 [BLOB] Converting image to blob...');
+        const response = await fetch(imageUri);
+        const blob = await response.blob();
+        
+        console.log('🔄 [BLOB] Blob created:', {
+          size: blob.size,
+          type: blob.type
+        });
+        
+        // Upload to Supabase
+        const fileName = `test-upload-${Date.now()}.jpg`;
+        console.log('☁️ [SUPABASE] Starting upload with filename:', fileName);
+        
+        const url = await SupabaseService.uploadImage(blob, fileName);
+        
+        console.log('✅ [SUCCESS] Upload completed! URL:', url);
+        setUploadResult('✅ Image uploaded successfully! URL: ' + url);
+      } else {
+        console.log('❌ [PICKER] No image selected or picker was canceled');
+        setUploadResult('❌ No image selected');
+      }
+    } catch (error: any) {
+      console.error('❌ [ERROR] Upload failed:', {
+        message: error?.message,
+        stack: error?.stack,
+        name: error?.name,
+        fullError: error
+      });
+      setUploadResult('❌ Image upload failed: ' + (error?.message || error.toString()));
+    } finally {
+      setUploading(false);
+      console.log('🏁 [UPLOAD] Upload process finished');
+    }
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -48,6 +150,41 @@ export default function ProfileScreen() {
           <Text style={styles.menuText}>Settings</Text>
           <Text style={styles.menuArrow}>›</Text>
         </TouchableOpacity>
+      </View>
+
+      {/* Test Buttons */}
+      <View style={styles.testContainer}>
+        {/* Bucket List Test */}
+        <TouchableOpacity
+          style={styles.testButton}
+          onPress={testListBucket}
+          disabled={listing}
+        >
+          <Text style={styles.testButtonText}>
+            {listing ? 'Listing...' : 'Test Bucket List'}
+          </Text>
+        </TouchableOpacity>
+        {listResult && (
+          <Text style={[styles.resultText, { color: listResult.startsWith('✅') ? 'green' : 'red' }]}>
+            {listResult}
+          </Text>
+        )}
+
+        {/* Image Upload Test - NOW VISIBLE ON ALL PLATFORMS */}
+        <TouchableOpacity
+          style={styles.testButton}
+          onPress={testUploadImage}
+          disabled={uploading}
+        >
+          <Text style={styles.testButtonText}>
+            {uploading ? 'Uploading...' : 'Test Image Upload'}
+          </Text>
+        </TouchableOpacity>
+        {uploadResult && (
+          <Text style={[styles.resultText, { color: uploadResult.startsWith('✅') ? 'green' : 'red' }]}>
+            {uploadResult}
+          </Text>
+        )}
       </View>
     </View>
   );
@@ -128,5 +265,28 @@ const styles = StyleSheet.create({
   menuArrow: {
     fontSize: 20,
     color: "#999",
+  },
+  // Enhanced test section styles
+  testContainer: {
+    alignItems: 'center',
+    padding: 16,
+    gap: 16,
+  },
+  testButton: {
+    backgroundColor: '#0a7ea4',
+    padding: 12,
+    borderRadius: 8,
+    minWidth: 200,
+    alignItems: 'center',
+  },
+  testButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  resultText: {
+    marginTop: 8,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    fontSize: 12,
   },
 });
